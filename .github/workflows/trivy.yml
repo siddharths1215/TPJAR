@@ -1,23 +1,128 @@
-name: Generate SBOM
+name: Generate SBOM & Vulnerability Report
+
 on:
   push:
     branches:
-    - main
+      - main
+  pull_request:
+    branches:
+      - main
 
-## GITHUB_TOKEN authentication, add only if you're not going to use a PAT
 permissions:
   contents: write
+  security-events: write
 
 jobs:
-  generate-sbom:
+  scan-and-report:
     runs-on: ubuntu-latest
     steps:
+
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Run Trivy in GitHub SBOM mode and submit results to Dependency Graph
+      # Step 1: Discover and individually scan all JAR files
+      - name: Deep scan all JAR files
+        run: |
+          echo "=== Scanning all JAR files in repository ===" > jar-scan-report.txt
+          echo "Scan date: $(date -u)" >> jar-scan-report.txt
+          echo "" >> jar-scan-report.txt
+
+          JAR_COUNT=0
+          VULN_COUNT=0
+
+          find . -name "*.jar" -type f | while read jar; do
+            JAR_COUNT=$((JAR_COUNT + 1))
+            echo "----------------------------------------" >> jar-scan-report.txt
+            echo "Scanning: $jar" >> jar-scan-report.txt
+            echo "Size: $(du -h "$jar" | cut -f1)" >> jar-scan-report.txt
+            echo "SHA256: $(sha256sum "$jar" | cut -d' ' -f1)" >> jar-scan-report.txt
+            echo "" >> jar-scan-report.txt
+
+            # Extract metadata if available
+            if unzip -l "$jar" 2>/dev/null | grep -q "pom.properties"; then
+              echo "Maven metadata found:" >> jar-scan-report.txt
+              unzip -p "$jar" "*/pom.properties" 2>/dev/null >> jar-scan-report.txt
+              echo "" >> jar-scan-report.txt
+            else
+              echo "WARNING: No Maven metadata found — this JAR may not be identifiable" >> jar-scan-report.txt
+              echo "" >> jar-scan-report.txt
+            fi
+
+            # Run Trivy against individual JAR
+            trivy rootfs --scanners vuln \
+              --severity CRITICAL,HIGH,MEDIUM \
+              --format table \
+              "$jar" >> jar-scan-report.txt 2>&1 || true
+
+            echo "" >> jar-scan-report.txt
+          done
+
+          # Generate summary
+          TOTAL_JARS=$(find . -name "*.jar" -type f | wc -l)
+          JARS_WITHOUT_META=$(find . -name "*.jar" -type f -exec sh -c \
+            'unzip -l "$1" 2>/dev/null | grep -q "pom.properties" || echo "$1"' _ {} \; | wc -l)
+
+          echo "=== SUMMARY ===" >> jar-scan-report.txt
+          echo "Total JARs found: $TOTAL_JARS" >> jar-scan-report.txt
+          echo "JARs without Maven metadata: $JARS_WITHOUT_META" >> jar-scan-report.txt
+
+          # Print summary to workflow log
+          cat jar-scan-report.txt
+
+      - name: Install Trivy CLI (for JAR scan step)
+        run: |
+          sudo apt-get install -y wget apt-transport-https gnupg lsb-release
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+          echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee /etc/apt/sources.list.d/trivy.list
+          sudo apt-get update
+          sudo apt-get install -y trivy
+
+      # Step 2: Filesystem scan to detect JARs and dependencies
+      - name: Trivy filesystem scan (SBOM)
         uses: aquasecurity/trivy-action@v0.36.0
         with:
-          scan-type: 'repo'
+          scan-type: 'fs'
+          scan-ref: '.'
           format: 'github'
           output: 'dependency-results.sbom.json'
+
+      # Step 3: Submit SBOM to GitHub Dependency Graph
+      - name: Submit SBOM to Dependency Graph
+        uses: advanced-security/spdx-dependency-submission-action@v0.1.1
+        with:
+          filePath: 'dependency-results.sbom.json'
+
+      # Step 4: Vulnerability scan with SARIF output for GitHub Security tab
+      - name: Trivy vulnerability scan (SARIF)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH,MEDIUM'
+
+      - name: Upload SARIF to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+      # Step 5: Human-readable report as build artifact
+      - name: Trivy vulnerability report (table)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'table'
+          output: 'trivy-report.txt'
+          severity: 'CRITICAL,HIGH,MEDIUM'
+
+      - name: Upload all reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: vulnerability-reports
+          path: |
+            trivy-report.txt
+            jar-scan-report.txt
+            dependency-results.sbom.json
+          retention-days: 30
