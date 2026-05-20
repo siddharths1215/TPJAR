@@ -1,4 +1,4 @@
-name: Generate SBOM & Vulnerability Report genration
+name: Generate SBOM & Vulnerability Report
 
 on:
   push:
@@ -20,35 +20,39 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # Step 1: Discover and individually scan all JAR files
+      # Step 1: Install Trivy CLI first — needed for the JAR scan step
+      - name: Install Trivy CLI
+        run: |
+          sudo apt-get install -y wget apt-transport-https gnupg lsb-release
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+          echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee /etc/apt/sources.list.d/trivy.list
+          sudo apt-get update
+          sudo apt-get install -y trivy
+          trivy --version
+
+      # Step 2: Discover and individually scan all JAR files
       - name: Deep scan all JAR files
         run: |
           echo "=== Scanning all JAR files in repository ===" > jar-scan-report.txt
           echo "Scan date: $(date -u)" >> jar-scan-report.txt
           echo "" >> jar-scan-report.txt
 
-          JAR_COUNT=0
-          VULN_COUNT=0
-
           find . -name "*.jar" -type f | while read jar; do
-            JAR_COUNT=$((JAR_COUNT + 1))
             echo "----------------------------------------" >> jar-scan-report.txt
             echo "Scanning: $jar" >> jar-scan-report.txt
             echo "Size: $(du -h "$jar" | cut -f1)" >> jar-scan-report.txt
             echo "SHA256: $(sha256sum "$jar" | cut -d' ' -f1)" >> jar-scan-report.txt
             echo "" >> jar-scan-report.txt
 
-            # Extract metadata if available
             if unzip -l "$jar" 2>/dev/null | grep -q "pom.properties"; then
               echo "Maven metadata found:" >> jar-scan-report.txt
               unzip -p "$jar" "*/pom.properties" 2>/dev/null >> jar-scan-report.txt
               echo "" >> jar-scan-report.txt
             else
-              echo "WARNING: No Maven metadata found — this JAR may not be identifiable" >> jar-scan-report.txt
+              echo "WARNING: No Maven metadata found" >> jar-scan-report.txt
               echo "" >> jar-scan-report.txt
             fi
 
-            # Run Trivy against individual JAR
             trivy rootfs --scanners vuln \
               --severity CRITICAL,HIGH,MEDIUM \
               --format table \
@@ -57,7 +61,6 @@ jobs:
             echo "" >> jar-scan-report.txt
           done
 
-          # Generate summary
           TOTAL_JARS=$(find . -name "*.jar" -type f | wc -l)
           JARS_WITHOUT_META=$(find . -name "*.jar" -type f -exec sh -c \
             'unzip -l "$1" 2>/dev/null | grep -q "pom.properties" || echo "$1"' _ {} \; | wc -l)
@@ -66,18 +69,9 @@ jobs:
           echo "Total JARs found: $TOTAL_JARS" >> jar-scan-report.txt
           echo "JARs without Maven metadata: $JARS_WITHOUT_META" >> jar-scan-report.txt
 
-          # Print summary to workflow log
           cat jar-scan-report.txt
 
-      - name: Install Trivy CLI (for JAR scan step)
-        run: |
-          sudo apt-get install -y wget apt-transport-https gnupg lsb-release
-          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
-          echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee /etc/apt/sources.list.d/trivy.list
-          sudo apt-get update
-          sudo apt-get install -y trivy
-
-      # Step 2: Filesystem scan to detect JARs and dependencies
+      # Step 3: Filesystem scan (SBOM)
       - name: Trivy filesystem scan (SBOM)
         uses: aquasecurity/trivy-action@v0.36.0
         with:
@@ -86,13 +80,13 @@ jobs:
           format: 'github'
           output: 'dependency-results.sbom.json'
 
-      # Step 3: Submit SBOM to GitHub Dependency Graph
+      # Step 4: Submit SBOM to GitHub Dependency Graph
       - name: Submit SBOM to Dependency Graph
         uses: advanced-security/spdx-dependency-submission-action@v0.1.1
         with:
           filePath: 'dependency-results.sbom.json'
 
-      # Step 4: Vulnerability scan with SARIF output for GitHub Security tab
+      # Step 5: Vulnerability scan (SARIF)
       - name: Trivy vulnerability scan (SARIF)
         uses: aquasecurity/trivy-action@v0.36.0
         with:
@@ -107,7 +101,7 @@ jobs:
         with:
           sarif_file: 'trivy-results.sarif'
 
-      # Step 5: Human-readable report as build artifact
+      # Step 6: Human-readable report
       - name: Trivy vulnerability report (table)
         uses: aquasecurity/trivy-action@v0.36.0
         with:
