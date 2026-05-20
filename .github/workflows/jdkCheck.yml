@@ -1,0 +1,50 @@
+# Step 2: Discover and individually scan all JAR files in the JDK folder
+      - name: Deep scan all JAR files in JDK folder
+        run: |
+          # Update this path to match your repo's JDK folder
+          JDK_DIR="./jdk"
+
+          if [ ! -d "$JDK_DIR" ]; then
+            echo "ERROR: JDK directory '$JDK_DIR' not found in repository"
+            echo "Available directories:"
+            ls -la
+            exit 1
+          fi
+
+          echo "=== Scanning JAR files in $JDK_DIR ===" > jar-scan-report.txt
+          echo "Scan date: $(date -u)" >> jar-scan-report.txt
+          echo "" >> jar-scan-report.txt
+
+          find "$JDK_DIR" -name "*.jar" -type f | while read jar; do
+            echo "----------------------------------------" >> jar-scan-report.txt
+            echo "Scanning: $jar" >> jar-scan-report.txt
+            echo "Size: $(du -h "$jar" | cut -f1)" >> jar-scan-report.txt
+            echo "SHA256: $(sha256sum "$jar" | cut -d' ' -f1)" >> jar-scan-report.txt
+            echo "" >> jar-scan-report.txt
+
+            if unzip -l "$jar" 2>/dev/null | grep -q "pom.properties"; then
+              echo "Maven metadata found:" >> jar-scan-report.txt
+              unzip -p "$jar" "*/pom.properties" 2>/dev/null >> jar-scan-report.txt
+              echo "" >> jar-scan-report.txt
+            else
+              echo "WARNING: No Maven metadata found" >> jar-scan-report.txt
+              echo "" >> jar-scan-report.txt
+            fi
+
+            trivy rootfs --scanners vuln \
+              --severity CRITICAL,HIGH,MEDIUM \
+              --format table \
+              "$jar" >> jar-scan-report.txt 2>&1 || true
+
+            echo "" >> jar-scan-report.txt
+          done
+
+          TOTAL_JARS=$(find "$JDK_DIR" -name "*.jar" -type f | wc -l)
+          JARS_WITHOUT_META=$(find "$JDK_DIR" -name "*.jar" -type f -exec sh -c \
+            'unzip -l "$1" 2>/dev/null | grep -q "pom.properties" || echo "$1"' _ {} \; | wc -l)
+
+          echo "=== SUMMARY ===" >> jar-scan-report.txt
+          echo "Total JARs found: $TOTAL_JARS" >> jar-scan-report.txt
+          echo "JARs without Maven metadata: $JARS_WITHOUT_META" >> jar-scan-report.txt
+
+          cat jar-scan-report.txt
