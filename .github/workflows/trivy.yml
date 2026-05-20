@@ -1,4 +1,4 @@
-name: Generate SBOM & Vulnerability Report
+name: Generate SBOM & Vulnerability Report genration
 
 on:
   push:
