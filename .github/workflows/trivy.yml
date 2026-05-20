@@ -18,6 +18,6 @@ jobs:
       - name: Run Trivy in GitHub SBOM mode and submit results to Dependency Graph
         uses: aquasecurity/trivy-action@v0.36.0
         with:
-          scan-type: 'fs'
+          scan-type: 'repo'
           format: 'github'
           output: 'dependency-results.sbom.json'
