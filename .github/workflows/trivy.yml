@@ -88,7 +88,7 @@ jobs:
 
       # Step 3: Submit SBOM to GitHub Dependency Graph
       - name: Submit SBOM to Dependency Graph
-        uses: advanced-security/spdx-dependency-submission-action@v0.1.1
+        uses: advanced-security/spdx-dependency-submission-action@v0.2.0
         with:
           filePath: 'dependency-results.sbom.json'
 
